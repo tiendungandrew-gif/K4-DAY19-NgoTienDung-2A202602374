@@ -54,9 +54,27 @@ def normalize_crime(name: str) -> str:
 
 def link_entity(name: str, known: list[str], normalize: Callable[[str], str] = normalize_crime) -> str | None:
     """Map a free-text mention (e.g. a charge written by a journalist) onto one canonical name in `known`."""
-    # TODO KG-1: normalize both sides, exact match first, then difflib.get_close_matches(cutoff=0.8).
-    #            Return the ORIGINAL spelling from `known`; return None when nothing is close enough.
-    raise NotImplementedError("TODO KG-1 link_entity (src/graph.py) - kiểm tra: pytest tests/test_graph.py -k LinkEntity")
+    if not name or not name.strip() or not known:
+        return None
+
+    norm_name = normalize(name)
+    if not norm_name:
+        return None
+
+    norm_to_orig: dict[str, str] = {}
+    for item in known:
+        norm_key = normalize(item)
+        if norm_key not in norm_to_orig:
+            norm_to_orig[norm_key] = item
+
+    if norm_name in norm_to_orig:
+        return norm_to_orig[norm_name]
+
+    matches = difflib.get_close_matches(norm_name, list(norm_to_orig.keys()), n=1, cutoff=0.8)
+    if matches:
+        return norm_to_orig[matches[0]]
+
+    return None
 
 def find_substances(text: str) -> list[str]:
     lowered = text.lower()
