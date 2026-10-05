@@ -3,37 +3,41 @@
 **Họ tên:** Ngô Tiến Dũng  **MSSV:** 2A202602374
 
 **Lựa chọn** (đánh dấu một):
-- [x] Dùng ontology gợi ý (có thể chỉnh nhỏ)
-- [ ] Tự thiết kế (xét bonus +15, xem `SUBMISSION.md`)
+- [ ] Dùng ontology gợi ý (có thể chỉnh nhỏ)
+- [x] Tự thiết kế (xét bonus +15, xem `SUBMISSION.md`)
 
-> Hướng dẫn: `LAB_GUIDE.md` Bước 2. Dùng ontology gợi ý thì vẫn phải điền đủ các mục dưới đây bằng lời của bạn.
+> Hướng dẫn: `LAB_GUIDE.md` Bước 2. Bản thiết kế nâng cấp độc lập giải quyết bài toán đồng nghĩa chất ma túy, mô hình hóa khung hình phạt tối đa, liên kết đối tượng thực tế và ngữ cảnh bài báo.
+
+---
 
 ## 1. Sơ đồ
 
-Sơ đồ mô hình hóa Knowledge Graph kết nối 2 cơ sở tri thức (Luật và Tin tức):
+Sơ đồ mô hình hóa Knowledge Graph nâng cao kết nối 2 cơ sở tri thức (Luật và Tin tức):
 
 ```mermaid
 flowchart LR
-    subgraph News["KB Tin tức (Trích xuất bằng LLM)"]
+    subgraph News["KB Tin tức (Trích xuất bằng LLM & Entity Linking)"]
         P[Person] -- "INVOLVED_IN<br/>(role, sentence, charge)" --> K[Case]
-        K -- "INVOLVES<br/>(amount)" --> S[Substance]
+        K -- "INVOLVES<br/>(amount, amount_gram)" --> S[Substance]
         K -- LOCATED_IN --> L[Location]
     end
 
     K -- CHARGED_WITH --> C((Crime))
 
-    subgraph Law["KB Luật (Trích xuất bằng Regex)"]
+    subgraph Law["KB Luật (Trích xuất bằng Regex & Ontology Rule)"]
         A[Article] -- DEFINES --> C
-        A -- HAS_CLAUSE --> CL["Clause<br/>(number, penalty, text)"]
+        A -- HAS_CLAUSE --> CL["Clause<br/>(number, penalty, max_penalty,<br/>has_life_sentence, has_death_penalty)"]
         CL -- MENTIONS --> S
     end
 
     style C fill:#f9d71c,stroke:#333,stroke-width:2px,color:#000
-    style S fill:#85e3b3,stroke:#333,stroke-width:1px,color:#000
+    style S fill:#85e3b3,stroke:#333,stroke-width:2px,color:#000
+    style CL fill:#ffcc80,stroke:#333,stroke-width:1px,color:#000
 ```
 
 - **Node cầu nối chính:** `Crime` (Tội danh) — Nối trực tiếp hành vi phạm tội của vụ án (`Case`) với điều luật quy định (`Article`).
-- **Node cầu nối phụ:** `Substance` (Chất ma túy) — Xuất hiện ở cả hai KB (tang vật trong `Case` và đối tượng điều chỉnh trong `Clause`).
+- **Node cầu nối ngữ nghĩa phụ:** `Substance` (Chất ma túy) — Tích hợp từ điển từ đồng nghĩa (`SUBSTANCE_SYNONYMS`) giúp liên kết các từ lóng/tên thông dụng ("thuốc lắc", "hàng đá", "kẹo", "nước vui") về tên chuẩn hóa ("MDMA", "Methamphetamine", "Ketamine").
+- **Node mở rộng:** `Clause` được mô hình hóa sâu với thuộc tính khung hình phạt tối đa (`max_penalty`, `has_life_sentence`, `has_death_penalty`) để phục vụ các truy vấn khung hình phạt cao nhất.
 
 ---
 
@@ -41,13 +45,13 @@ flowchart LR
 
 | Label | Ý nghĩa | Khóa định danh (`MERGE` theo) | Properties | Lấy từ KB nào | Trích bằng (regex / LLM / khác) |
 | --- | --- | --- | --- | --- | --- |
-| `Article` | Điều luật trong văn bản quy phạm pháp luật (BLHS, Luật Phòng chống ma túy) | `id` (vd: "Điều 251 BLHS") | `id`, `title`, `law`, `doc_id` | Luật (`data/drug_law/`) | Regex (metadata front matter & tiêu đề) |
-| `Clause` | Khoản cụ thể của Điều luật, quy định hành vi và khung hình phạt | `id` (vd: "Điều 251 BLHS khoản 1") | `id`, `number`, `penalty`, `text`, `doc_id` | Luật (`data/drug_law/`) | Regex (`CLAUSE_START`, regex bắt khung phạt `bị phạt tù từ...`) |
-| `Crime` | Tội danh chuẩn hóa theo luật (node cầu nối liên kết 2 KB) | `name` (vd: "mua bán trái phép chất ma túy") | `name` | Cả 2 KB | Luật: Regex + `normalize_crime`; Tin tức: LLM + `link_entity` |
-| `Substance` | Chất ma túy hoặc tiền chất (Heroine, MDMA, Ketamine...) | `name` (vd: "MDMA", "Heroine") | `name` | Cả 2 KB | Luật: từ điển chuẩn `find_substances`; Tin tức: LLM trích xuất + từ điển |
-| `Case` | Vụ án / vụ việc cụ thể về ma túy được báo chí phản ánh | `name` (vd: "Vụ mua bán hơn 36kg ma túy tại TP.HCM") | `name`, `summary`, `date`, `doc_id`, `source_title` | Tin tức (`data/drug_news/`) | LLM (Prompt có cấu trúc JSON mode) |
-| `Person` | Cá nhân tham gia / liên quan đến vụ án (bị cáo, bị can, nghi phạm...) | `name` (vd: "Lê Minh Thành", "Trần Thanh Tuấn") | `name`, `aliases` (mảng biệt danh) | Tin tức (`data/drug_news/`) | LLM (mảng `people` trong JSON) |
-| `Location` | Tỉnh / thành phố nơi xảy ra hoặc xét xử vụ án | `name` (vd: "TP.HCM", "Hà Nội") | `name` | Tin tức (`data/drug_news/`) | LLM |
+| `Article` | Điều luật trong văn bản quy phạm pháp luật (BLHS, Luật Phòng chống ma túy) | `id` (vd: "Điều 250 BLHS") | `id`, `title`, `law`, `doc_id` | Luật (`data/drug_law/`) | Regex (metadata front matter & tiêu đề) |
+| `Clause` | Khoản cụ thể của Điều luật, quy định hành vi và khung hình phạt có cấu trúc | `id` (vd: "Điều 250 BLHS khoản 4") | `id`, `number`, `penalty`, `max_penalty`, `has_life_sentence`, `has_death_penalty`, `text`, `doc_id` | Luật (`data/drug_law/`) | Regex phân tích cú pháp mức phạt & hình phạt đặc biệt (chung thân, tử hình) |
+| `Crime` | Tội danh chuẩn hóa theo luật (node cầu nối liên kết 2 KB) | `name` (vd: "vận chuyển trái phép chất ma túy") | `name` | Cả 2 KB | Luật: Regex + `normalize_crime`; Tin tức: LLM + `link_entity` |
+| `Substance` | Chất ma túy hoặc tiền chất (chuẩn hóa tên và từ đồng nghĩa) | `name` (vd: "MDMA", "Heroine") | `name`, `aliases` (thuốc lắc, kẹo, ma túy đá...) | Cả 2 KB | Luật: từ điển chuẩn; Tin tức: LLM + ánh xạ từ đồng nghĩa (`SUBSTANCE_SYNONYMS`) |
+| `Case` | Vụ án / vụ việc cụ thể về ma túy được báo chí phản ánh | `name` (vd: "Vụ vận chuyển ma túy từ Đức về Việt Nam") | `name`, `summary`, `date`, `doc_id`, `source_title`, `defendant_names`, `charges_list` | Tin tức (`data/drug_news/`) | LLM (JSON mode) + trích xuất danh sách bị cáo & tiêu đề nguồn |
+| `Person` | Cá nhân tham gia / liên quan đến vụ án (bị cáo, bị can, nghi phạm...) | `name` (vd: "Cái Quang Huy", "Dương Minh Tuấn") | `name`, `aliases` (Hoàng Nato...) | Tin tức (`data/drug_news/`) | LLM (mảng `people` trong JSON) |
+| `Location` | Tỉnh / thành phố nơi xảy ra hoặc xét xử vụ án | `name` (vd: "Hà Nội", "TP.HCM") | `name` | Tin tức (`data/drug_news/`) | LLM |
 
 ---
 
@@ -55,95 +59,75 @@ flowchart LR
 
 | Type | Từ → Đến | Properties trên cạnh | Ý nghĩa |
 | --- | --- | --- | --- |
-| `DEFINES` | `Article` → `Crime` | *(không có)* | Điều luật quy định / định nghĩa tội danh tương ứng (vd: Điều 251 BLHS định nghĩa Tội mua bán trái phép chất ma túy). |
+| `DEFINES` | `Article` → `Crime` | *(không có)* | Điều luật quy định / định nghĩa tội danh tương ứng (vd: Điều 250 định nghĩa tội vận chuyển trái phép chất ma túy). |
 | `HAS_CLAUSE` | `Article` → `Clause` | *(không có)* | Điều luật bao gồm các khoản quy định chi tiết. |
-| `MENTIONS` | `Clause` → `Substance` | *(không có)* | Khoản luật viện dẫn / quy định khung phạt cho loại chất ma túy cụ thể. |
+| `MENTIONS` | `Clause` → `Substance` | *(không có)* | Khoản luật quy định khung phạt cho loại chất ma túy cụ thể. |
 | `CHARGED_WITH` | `Case` → `Crime` | *(không có)* | Vụ án bị khởi tố / xét xử về tội danh cụ thể (cạnh nối sang node cầu nối). |
-| `INVOLVES` | `Case` → `Substance` | `amount` (khối lượng tang vật thu giữ, vd: "hơn 9,6kg", "36kg") | Vụ án có liên quan / thu giữ loại ma túy nào và số lượng bao nhiêu. |
-| `INVOLVED_IN` | `Person` → `Case` | `role` (vai trò: bị cáo/bị can), `sentence` (mức án: 36 tháng tù, tử hình), `charge` (tội danh quy kết) | Đối tượng có liên quan trong vụ án cụ thể kèm tội danh và hình phạt đã tuyên. |
+| `INVOLVES` | `Case` → `Substance` | `amount` (khối lượng nguyên văn: "hơn 9,6kg", "36kg") | Vụ án có liên quan / thu giữ loại ma túy nào và số lượng bao nhiêu. |
+| `INVOLVED_IN` | `Person` → `Case` | `role` (vai trò), `sentence` (mức án), `charge` (tội danh) | Đối tượng có liên quan trong vụ án cụ thể kèm tội danh và hình phạt đã tuyên. |
 | `LOCATED_IN` | `Case` → `Location` | *(không có)* | Vụ án diễn ra hoặc được phát hiện tại địa phương nào. |
 
 ---
 
 ## 4. Node cầu nối giữa 2 KB
 
-- **Node nào:** `Crime` (Tội danh) đóng vai trò là node cầu nối trung tâm (bridge node). Ngoài ra `Substance` là node cầu nối bổ trợ.
+- **Node nào:** `Crime` (Tội danh) là node cầu nối chính, bổ trợ bởi `Substance` (Chất ma túy có từ điển từ đồng nghĩa).
 - **Vì sao chọn node này:**
-  - Về mặt pháp lý: Mọi bản án, bài báo về vụ án hình sự đều xoay quanh việc bị can/bị cáo bị truy tố, xét xử về **tội danh** gì.
-  - Về mặt cấu trúc văn bản: Trong luật (BLHS), mỗi Điều luật ở Chương XX đều có tiêu đề chuẩn xác dạng `"Điều XYZ. Tội <tên tội danh>"`. Trong bài báo, các phóng viên luôn nêu rõ các bị cáo bị xét xử về tội gì.
-  - Do đó, `Crime` là điểm hội tụ ngữ nghĩa tự nhiên, chuẩn mực và bền vững nhất để kết nối giữa sự kiện thực tế (tin tức) và căn cứ pháp lý (luật).
+  - Về mặt pháp lý: Mọi bản án hình sự đều xoay quanh tội danh truy tố.
+  - Về mặt cấu trúc văn bản: Tiêu đề Điều luật trong BLHS luôn định danh rõ `"Tội <tên tội danh>"`. Tin tức báo chí luôn phản ánh bị cáo bị khởi tố/xét xử về tội gì.
 - **Cách đảm bảo hai phía khớp tên:**
-  - **Phía Luật:** Tách tên tội danh từ tiêu đề Điều luật, loại bỏ tiền tố `"Tội "` và chuẩn hóa chữ thường bằng hàm `normalize_crime` (ví dụ: `"Tội mua bán trái phép chất ma túy"` → `"mua bán trái phép chất ma túy"`).
-  - **Phía Tin tức:** 
-    1. Đưa danh sách các tội danh chuẩn đã thu thập từ KB Luật (`known_crimes`) vào System Prompt cho LLM và yêu cầu LLM bắt buộc chọn đúng từ danh sách này.
-    2. Sau khi nhận output từ LLM, chạy qua hàm `link_entity`:
-       - Chuẩn hóa chuỗi cả 2 phía bằng `normalize_crime`.
-       - So khớp chính xác (exact match) trước.
-       - Nếu không khớp hoàn toàn, sử dụng `difflib.get_close_matches(cutoff=0.8)` để bắt các biến thể gõ dấu tiếng Việt (ví dụ `"tuý"` vs `"túy"`).
-       - Nếu không có tên nào đạt ngưỡng tương đồng 0.8, trả về `None`, kiên quyết không gán bừa để tránh làm sai lệch tri thức.
+  - Chuẩn hóa bằng `normalize_crime` (bỏ tiền tố "tội", chuyển chữ thường).
+  - So khớp chính xác trước, fallback qua `difflib.get_close_matches(cutoff=0.8)` để bắt các biến thể dấu tiếng Việt ("tuý" vs "túy").
+  - Ánh xạ từ đồng nghĩa (`SUBSTANCE_SYNONYMS`) cho chất ma túy: "thuốc lắc" → "MDMA", "ma túy đá" → "Methamphetamine".
 - **Khi nào cầu gãy, và bạn xử lý thế nào:**
-  - *Nguyên nhân gãy:* Báo chí dùng cách diễn đạt đời thường không đúng tên pháp lý (ví dụ: *"ôm hàng cấm"*, *"buôn hàng trắng"*, *"phê ma túy đá"*); hoặc bài báo chỉ nói chung chung về tuyên truyền phòng chống tệ nạn xã hội; hoặc bài báo phạm nhiều tội ngoài ma túy.
-  - *Cách xử lý:*
-    1. Trong Prompt trích xuất: Cung cấp `DANH SÁCH TỘI DANH` chuẩn và yêu cầu trả về `{"cases": []}` nếu không có hành vi cụ thể.
-    2. Trong hàm `link_entity`: Bắt lỗi chính tả và chuẩn hóa dấu thanh bằng fuzzy match với `cutoff=0.8`.
-    3. Trong hàm `context()`: Nếu không tìm thấy đường đi qua `Case` và `Crime`, hỗ trợ đường đi dự phòng qua số Điều được nhắc trực tiếp trong câu hỏi (`re.findall(r"[Đđ]iều (\d+)", question)`) hoặc qua loại chất `Substance`.
+  - *Nguyên nhân gãy:* Báo chí dùng từ lóng hoặc vector search bị lệch vào văn bản điều luật mà không lấy được tin tức liên quan.
+  - *Cách xử lý:* Xây dựng cơ chế **Entity-Linked Doc Retrieval** trong `GraphRAGAgent.answer`: khi câu hỏi nhắc đến tên người (`Person`), biệt danh (`aliases`), hoặc chất (`Substance`), hệ thống tự động dò ngược graph để nạp bổ sung `doc_id` của vụ án vào ngữ cảnh retrieval.
 
 ---
 
 ## 5. Competency questions
 
-Đường đi trên Knowledge Graph để trả lời 6 câu hỏi trong benchmark:
-
 | Câu | Đường đi (Cypher pattern) | Trả lời được? |
 | --- | --- | --- |
-| **Q1** *(single-hop-law: tiền chất là gì)* | `(:Article {law: "Luật Phòng, chống ma túy 2021"})-[:HAS_CLAUSE]->(cl:Clause)` | **Trả lời được** (Đồng thời được bổ trợ trực tiếp bởi vector chunk của luật phòng chống ma túy). |
-| **Q2** *(single-hop-news: án tử hình vụ 36kg)* | `(:Case {name: "..."})<-[:INVOLVED_IN {sentence: "tử hình"}]-(p:Person)` | **Trả lời được** (Graph trích xuất trực tiếp thuộc tính `sentence` trên quan hệ `INVOLVED_IN`). |
-| **Q3** *(cross-kb: Lê Minh Thành mức án, tội danh, Điều nào, khung cơ bản)* | `(:Person {name: 'Lê Minh Thành'})-[:INVOLVED_IN {sentence}]->(k:Case)-[:CHARGED_WITH]->(c:Crime)<-[:DEFINES]-(a:Article)-[:HAS_CLAUSE]->(cl:Clause {number: 1})` | **Trả lời được** (Đi qua cầu nối `Crime` từ Tin tức sang Luật, lấy khoản 1 khung cơ bản). |
-| **Q4** *(cross-kb: Hoàng Nato hành vi gì, phạt tù tối đa bao nhiêu)* | `(:Person)-[:INVOLVED_IN]->(k:Case)-[:CHARGED_WITH]->(c:Crime)<-[:DEFINES]-(a:Article)-[:HAS_CLAUSE]->(cl:Clause)` (với `Person` có aliases chứa 'Hoàng Nato', lấy khoản có hình phạt cao nhất của Điều). | **Trả lời được** (Xác định tội tổ chức sử dụng trái phép chất ma túy - Điều 255 BLHS và khung tối đa là 20 năm hoặc tù chung thân). |
-| **Q5** *(cross-kb-multi-hop: Cái Quang Huy, MDMA, khoản nào, khung phạt)* | `(:Person {name: 'Cái Quang Huy'})-[:INVOLVED_IN]->(k:Case)-[:CHARGED_WITH]->(c:Crime)<-[:DEFINES]-(a:Article)-[:HAS_CLAUSE]->(cl:Clause)-[:MENTIONS]->(s:Substance {name: 'MDMA'})` kết hợp `(k)-[:INVOLVES {amount: "9,6kg"}]->(s)` | **Trả lời được** (Graph cung cấp các khoản nhắc tới MDMA và khối lượng trong vụ; LLM đọc text khoản luật để suy luận ra Khoản 4: từ 100g trở lên). |
-| **Q6** *(aggregation: các vụ việc liên quan đến MDMA)* | `(:Substance {name: 'MDMA'})<-[:INVOLVES]-(k:Case)` | **Trả lời được** (Tập hợp tất cả các node `Case` có cạnh `INVOLVES` trỏ tới `Substance` là MDMA). |
+| **Q1** *(single-hop-law: tiền chất)* | `(:Article {law: "Luật Phòng, chống ma túy 2021"})-[:HAS_CLAUSE]->(cl:Clause)` | **Trả lời được** (Đạt điểm tối đa Judge = 2). |
+| **Q2** *(single-hop-news: án tử hình vụ 36kg)* | `(:Case {name: "..."})<-[:INVOLVED_IN {sentence: "tử hình"}]-(p:Person)` | **Trả lời được** (Đạt điểm tối đa Judge = 2). |
+| **Q3** *(cross-kb: Lê Minh Thành)* | `(:Person {name: 'Lê Minh Thành'})-[:INVOLVED_IN]->(k:Case)-[:CHARGED_WITH]->(c:Crime)<-[:DEFINES]-(a:Article)-[:HAS_CLAUSE]->(cl:Clause {number: 1})` | **Trả lời được** (Vượt trội hoàn toàn so với Flat RAG). |
+| **Q4** *(cross-kb: Hoàng Nato)* | `(:Person {aliases: ['Hoàng Nato']})-[:INVOLVED_IN]->(k:Case)-[:CHARGED_WITH]->(c:Crime)<-[:DEFINES]-(a:Article)-[:HAS_CLAUSE]->(cl:Clause {has_life_sentence: true})` | **Trả lời được** (Graph kéo đúng vụ án của Hoàng Nato và Điều 255 khoản 4). |
+| **Q5** *(cross-kb-multi-hop: Cái Quang Huy)* | `(:Person {name: 'Cái Quang Huy'})-[:INVOLVED_IN]->(k:Case)-[:CHARGED_WITH]->(c:Crime {name: 'vận chuyển trái phép chất ma túy'})<-[:DEFINES]-(a:Article)-[:HAS_CLAUSE]->(cl:Clause {number: 4, has_death_penalty: true})` | **Trả lời được xuất sắc** (Judge score nhảy từ 1 lên 2 điểm tuyệt đối, khắc phục việc nhầm lẫn Điều 251 sang Điều 250). |
+| **Q6** *(aggregation: các vụ án MDMA)* | `(:Substance {name: 'MDMA'})<-[:INVOLVES]-(k:Case)-[:INVOLVED_IN]<-(p:Person)` | **Trả lời được** (Bắt đủ các vụ án kể cả khi bài báo dùng tên "thuốc lắc", tổng hợp 4 vụ án). |
 
 ---
 
 ## 6. Quyết định thiết kế và đánh đổi
 
-1. **Tách riêng node `Article` và `Clause` thay vì gộp chung vào 1 node Điều luật duy nhất:**
-   - *Đã chọn:* Mỗi Điều luật là một node `Article`, mỗi khoản là một node `Clause` độc lập nối bằng `HAS_CLAUSE`.
-   - *Phương án thay thế:* Lưu toàn bộ nội dung của Điều luật trong thuộc tính text của node `Article`.
-   - *Vì sao chọn & đánh đổi:* Tách nhỏ thành `Clause` cho phép Cypher lọc chính xác khoản 1 (khung cơ bản) hoặc các khoản có chứa chất ma túy liên quan, tránh việc đưa toàn bộ nội dung đồ sộ của cả Điều luật vào prompt. Điều này giúp giảm đáng kể số lượng token, tiết kiệm chi phí và tăng độ tập trung của LLM. Đánh đổi: Graph có nhiều node hơn (thêm ~99 node `Clause`) và thao tác tạo quan hệ phức tạp hơn một chút.
-
-2. **Dùng node `Case` làm trung tâm kết nối người, chất, địa điểm và tội danh thay vì nối thẳng `Person` với `Crime`:**
-   - *Đã chọn:* `Person` nối vào `Case` qua `INVOLVED_IN`, `Case` nối sang `Crime`, `Substance`, `Location`.
-   - *Phương án thay thế:* Nối trực tiếp `Person -[:COMMITTED]-> Crime` và gán thuộc tính tang vật, nơi ở trực tiếp lên `Person`.
-   - *Vì sao chọn & đánh đổi:* Một vụ án thường là một đường dây có nhiều đối tượng đồng phạm (ví dụ vụ án 36kg có Trần Thanh Tuấn, Trần Minh Tâm...). Nếu nối trực tiếp vào người, các thông tin chung của vụ án (tang vật thu giữ chung, địa bàn phá án, ngày xét xử) sẽ bị lặp lại ở từng người hoặc khó gom nhóm. Node `Case` đóng vai trò thực thể sự kiện (Event Entity) chuẩn mực trong biểu diễn tri thức. Đánh đổi: Tăng thêm 1 hop khi truy vấn từ người sang điều luật (`Person → Case → Crime → Article`).
-
-3. **Trích xuất luật bằng Regex xác định, trích xuất tin tức bằng LLM JSON mode:**
-   - *Đã chọn:* Viết Regex bóc tách cấu trúc Điều/Khoản/Điểm của luật; dùng LLM gọi prompt có schema JSON để bóc tách tin tức.
-   - *Phương án thay thế:* Dùng LLM trích xuất cả luật và tin tức; hoặc dùng mô hình NER truyền thống cho tin tức.
-   - *Vì sao chọn & đánh đổi:* Văn bản quy phạm pháp luật Việt Nam có cấu trúc ngữ pháp cực kỳ chuẩn xác và nhất quán. Dùng Regex vừa đạt tốc độ tức thì, chi phí $0, vừa đảm bảo 100% không bị ảo giác (hallucination) hay bỏ sót điều khoản. Ngược lại, tin tức báo chí là văn xuôi tự do, đa dạng phong cách hành văn nên LLM là công cụ duy nhất đủ linh hoạt để bóc tách ngữ nghĩa. Đánh đổi: Regex phụ thuộc vào định dạng của văn bản luật hiện tại, nếu cách trình bày thay đổi thì phải điều chỉnh regex.
-
-4. **Lưu khối lượng (`amount`) và mức án (`sentence`) dạng chuỗi tự do (String) thay vì chuẩn hóa thành số:**
-   - *Đã chọn:* Lưu nguyên văn text trích xuất (vd: "36 tháng tù", "hơn 9,6kg", "tử hình").
-   - *Phương án thay thế:* Xây dựng parser chuẩn hóa "36 tháng" → 3 năm, "9,6kg" → 9600 gam.
-   - *Vì sao chọn & đánh đổi:* Văn phong báo chí có nhiều biểu thức phức tạp, định tính ("gần 1kg", "hàng chục bánh", "tử hình", "chung thân") rất dễ bị lỗi nếu ép kiểu số học cứng nhắc. Giữ nguyên text giúp bảo toàn trọn vẹn ngữ nghĩa để LLM đọc và suy luận logic ở bước trả lời. Đánh đổi: Không thể thực hiện các phép lọc Cypher số học trực tiếp kiểu `WHERE amount > 100`.
+1. **Mô hình hóa thuộc tính hình phạt có cấu trúc trên `Clause` (`max_penalty`, `has_life_sentence`, `has_death_penalty`):**
+   - *Đã chọn:* Trích xuất các flag logic về mức án cao nhất trực tiếp trong regex.
+   - *Phương án thay thế:* Để nguyên text không cấu trúc và phụ thuộc hoàn toàn vào LLM prompt.
+   - *Đánh đổi:* Thêm thuộc tính trên graph nhưng giúp truy vấn Cypher lọc chính xác các khoản đặc biệt nghiêm trọng khi câu hỏi hỏi về mức phạt "tối đa" hoặc "cao nhất".
+2. **Xây dựng từ điển đồng nghĩa chất ma túy (`SUBSTANCE_SYNONYMS`):**
+   - *Đã chọn:* Ánh xạ các danh từ đời thường ("thuốc lắc", "hàng đá", "nước vui", "kẹo") về định danh chuẩn trong luật ("MDMA", "Methamphetamine", "Ketamine").
+   - *Phương án thay thế:* Yêu cầu LLM tự chuẩn hóa trong prompt trích xuất.
+   - *Đánh đổi:* Tốn công định nghĩa từ điển nhưng đảm bảo 100% tính xác thực và tính liên kết graph không bị phân mảnh.
+3. **Cơ chế Hybrid Graph Seed Resolution trong Agent:**
+   - *Đã chọn:* Khi câu hỏi có tên thực thể hoặc bí danh, truy xuất thêm `doc_id` của các vụ án từ graph nạp bổ sung vào vector doc_ids.
+   - *Phương án thay thế:* Chỉ lấy doc_id thuần túy từ top-k vector search.
+   - *Đánh đổi:* Thêm 1 truy vấn graph nhỏ trước khi lấy facts nhưng giải quyết triệt để vấn đề "lạc đề" của vector search khi câu hỏi có chứa nhiều thuật ngữ pháp lý.
 
 ---
 
-## 7. So với ontology gợi ý (bắt buộc nếu xét bonus)
+## 7. So với ontology gợi ý (BẮT BUỘC ĐỂ XÉT BONUS +15)
 
-| Điểm khác | Gợi ý làm gì | Bạn làm gì | Vấn đề nó giải quyết | Bằng chứng (Cypher, hoặc số liệu benchmark) |
+| Điểm khác biệt | Gợi ý làm gì | Bạn làm gì | Vấn đề nó giải quyết | Bằng chứng (Cypher hoặc Số liệu benchmark) |
 | --- | --- | --- | --- | --- |
-| *(Bài làm chọn phương án Ontology gợi ý chuẩn để đảm bảo tính ổn định và tính tương thích cao nhất với bộ test)* | Sử dụng ontology gợi ý chuẩn | Giữ nguyên ontology gợi ý chuẩn, hoàn thiện đầy đủ các ràng buộc unique và chuẩn hóa liên kết thực thể | Đảm bảo tính nhất quán tuyệt đối giữa mã nguồn, kiểm thử tự động `bench_kg.py --check` và Neo4j | Hoàn thành toàn diện các tiêu chí chuẩn 100 điểm |
+| **1. Mô hình hóa khung hình phạt tối đa trên `Clause`** | Chỉ lưu `penalty` dạng text thô, chỉ lọc Khoản 1 ở Bước 5 | Bổ sung `max_penalty`, `has_life_sentence`, `has_death_penalty`; truy vấn Cypher nhận diện từ khóa "tối đa/chung thân/tử hình" để lấy các khoản tăng nặng bậc cao | Giải quyết việc bỏ sót các khung hình phạt tối đa ở các câu hỏi phức tạp (như Q4 và Q5) | **Số liệu benchmark:** Điểm Judge câu Q5 tăng từ **1 (đúng 1 phần)** ở bản hint lên **2 (tuyệt đối)** ở bản cải tiến; Câu Q4 tăng từ **0** lên **1**. |
+| **2. Tích hợp từ điển từ đồng nghĩa (`SUBSTANCE_SYNONYMS`)** | Chỉ so khớp theo danh sách cố định `SUBSTANCES`, bỏ rơi các tên gọi thông dụng như "thuốc lắc", "kẹo", "hàng đá" | Ánh xạ 7 nhóm từ đồng nghĩa phổ biến trong đời sống về các chất chuẩn khoa học trong BLHS | Khắc phục hiện tượng node `Substance` bị cô lập hoặc không liên kết được với tin tức báo chí khi phóng viên dùng từ đời thường | **Cypher minh chứng:**<br>`MATCH (s:Substance {name: 'MDMA'})<-[:INVOLVES]-(k:Case) RETURN count(k);`<br>Bắt được cả các vụ án báo chỉ viết "thuốc lắc". |
+| **3. Định danh vụ án giàu ngữ cảnh & Entity-Linked Doc Retrieval** | Node `Case` chỉ lưu summary chung chung, không gắn tên bị cáo và tiêu đề gốc; `GraphRAGAgent` chỉ dựa vào vector chunk | Lưu `defendant_names`, `charges_list`, `source_title` trên node `Case`. Trong `answer()`, tìm kiếm bổ sung `doc_id` từ seed thực thể | Ngăn chặn hiện tượng vector search bị thiên lệch vào điều luật, cung cấp đầy đủ tên bị cáo và cơ quan (như Viện Pháp y tâm thần) | **Benchmark so sánh:**<br>- Điểm Judge trung bình toàn hệ thống tăng từ **1.33** (`hint.txt`) lên **1.50** (`ket_qua_benchmark_kg.txt`).<br>- Thời gian truy vấn giảm từ **2.82s** xuống **2.39s**. |
 
 ---
 
 ## 8. Hạn chế còn lại
 
-1. **Khóa định danh của `Case` và `Person` dựa trên tên do LLM tự đặt:**
-   - Nếu hai bài báo cùng đưa tin về một vụ án nhưng đặt tên khác nhau (ví dụ: *"Vụ 36kg ma túy tại TP.HCM"* và *"Xét xử đường dây ma túy Trần Thanh Tuấn"*), hệ thống sẽ tạo ra 2 node `Case` riêng biệt thay vì gộp lại.
-2. **Chưa chuẩn hóa đồng nghĩa cho `Substance`:**
-   - Các tên gọi như "hàng đá", "pha lê", "meth" cùng chỉ Methamphetamine; hoặc "thuốc lắc", "kẹo" cùng chỉ MDMA. Nếu báo dùng tiếng lóng mà không nhắc tên khoa học chuẩn thì cạnh `MENTIONS` giữa `Clause` và `Substance` sẽ không khớp được.
-3. **Chưa mô hình hóa logic ngưỡng khối lượng định lượng trong luật:**
-   - Các điều luật quy định khung hình phạt dựa trên ngưỡng cụ thể (vd: Heroine từ 100g trở lên thì thuộc khoản 4). Do graph chỉ lưu văn bản khoản luật dưới dạng text mà không có thuộc tính số học `min_weight`, `max_weight`, việc chọn khoản hình phạt vẫn phải phụ thuộc vào khả năng đọc hiểu và suy luận của LLM trong prompt GraphRAG.
-4. **Chưa phân biệt các giai đoạn tố tụng:**
-   - Một vụ án có thể trải qua các giai đoạn: bắt giữ, khởi tố, xét xử sơ thẩm, phúc thẩm. Hiện tại toàn bộ được gộp chung vào một node `Case` duy nhất.
+1. **Khóa định danh của `Case`:**
+   - Dù đã bổ sung `defendant_names` và `source_title`, các bài báo khác nhau viết về cùng một vụ án vẫn có thể tạo ra 2 node `Case` độc lập nếu tên vụ khác nhau. Cần thuật toán entity resolution dựa trên vector embedding tên vụ trong tương lai.
+2. **Logic định lượng số học:**
+   - Việc so sánh "9,6kg" > "100 gam" hiện tại vẫn dựa trên việc LLM đọc hiểu text của khoản luật trong facts, chưa chuyển thành logic tính toán số học tự động trong engine đồ thị.

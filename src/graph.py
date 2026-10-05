@@ -76,9 +76,27 @@ def link_entity(name: str, known: list[str], normalize: Callable[[str], str] = n
 
     return None
 
+SUBSTANCE_SYNONYMS: dict[str, list[str]] = {
+    "MDMA": ["thuốc lắc", "kẹo", "ecstasy", "viên nén"],
+    "Methamphetamine": ["ma túy đá", "hàng đá", "đá", "pha lê", "meth"],
+    "Heroine": ["hàng trắng", "bạch phiến", "heroin"],
+    "Cocaine": ["côca", "cocain", "coca"],
+    "Ketamine": ["ke", "nước vui", "kẹo ke"],
+    "cần sa": ["cỏ", "bồ đà", "marijuana"],
+    "thuốc phiện": ["a phiến", "nha phiến"],
+}
+
 def find_substances(text: str) -> list[str]:
     lowered = text.lower()
-    return [name for name in SUBSTANCES if name.lower() in lowered]
+    found = set()
+    for name in SUBSTANCES:
+        if name.lower() in lowered:
+            found.add(name)
+    for canonical, syns in SUBSTANCE_SYNONYMS.items():
+        for syn in syns:
+            if re.search(r"\b" + re.escape(syn) + r"\b", lowered):
+                found.add(canonical)
+    return sorted(found)
 
 # ----------------------------------------------------------------------------------------------
 # HINT — suggested ontology: extraction helpers
@@ -96,10 +114,16 @@ def parse_law_article(doc: Document) -> dict[str, Any]:
         text = body[start.start():end].strip()
         first_line = text.splitlines()[0]
         penalty = re.search(r"\bbị ((?:phạt|tù|cảnh cáo).+?)(?::|$)", first_line)
+        penalty_str = penalty.group(1).rstrip(".") if penalty else ""
+        is_life = "chung thân" in penalty_str.lower()
+        is_death = "tử hình" in penalty_str.lower()
         clauses.append({
             "id": f"{article_id} khoản {start.group(1)}",
             "number": int(start.group(1)),
-            "penalty": penalty.group(1).rstrip(".") if penalty else "",
+            "penalty": penalty_str,
+            "max_penalty": "tử hình" if is_death else ("tù chung thân" if is_life else penalty_str),
+            "has_life_sentence": is_life,
+            "has_death_penalty": is_death,
             "text": text,
             "substances": find_substances(text),
         })
@@ -148,6 +172,11 @@ def extract_news_cases(doc: Document, llm_fn: Callable[[str], str], known_crimes
         case["charges"] = sorted({c for c in (link_entity(x, known_crimes) for x in case.get("charges", [])) if c})
         for person in case.get("people", []):
             person["charge"] = link_entity(person.get("charge") or "", known_crimes) or ""
+        for s in case.get("substances", []):
+            s_name = s.get("name", "")
+            mapped = find_substances(s_name)
+            if mapped:
+                s["name"] = mapped[0]
     return cases
 
 # ----------------------------------------------------------------------------------------------
@@ -234,7 +263,13 @@ class Neo4jGraph:
             WITH a
             UNWIND $clauses AS clause
             MERGE (cl:Clause {id: clause.id})
-              SET cl.number = clause.number, cl.penalty = clause.penalty, cl.text = clause.text, cl.doc_id = $doc_id
+              SET cl.number = clause.number,
+                  cl.penalty = clause.penalty,
+                  cl.max_penalty = clause.max_penalty,
+                  cl.has_life_sentence = clause.has_life_sentence,
+                  cl.has_death_penalty = clause.has_death_penalty,
+                  cl.text = clause.text,
+                  cl.doc_id = $doc_id
             MERGE (a)-[:HAS_CLAUSE]->(cl)
             FOREACH (s IN clause.substances | MERGE (sub:Substance {name: s}) MERGE (cl)-[:MENTIONS]->(sub))
             """,
@@ -245,7 +280,8 @@ class Neo4jGraph:
         self.run(
             """
             MERGE (k:Case {name: $name})
-              SET k.summary = $summary, k.date = $date, k.doc_id = $doc_id, k.source_title = $title
+              SET k.summary = $summary, k.date = $date, k.doc_id = $doc_id, k.source_title = $title,
+                  k.defendant_names = $defendant_names, k.charges_list = $charges
             FOREACH (loc IN CASE WHEN $location = '' THEN [] ELSE [$location] END |
                 MERGE (l:Location {name: loc}) MERGE (k)-[:LOCATED_IN]->(l))
             FOREACH (crime IN $charges | MERGE (c:Crime {name: crime}) MERGE (k)-[:CHARGED_WITH]->(c))
@@ -258,6 +294,7 @@ class Neo4jGraph:
             name=case.get("name") or doc.metadata.get("title", doc.id),
             summary=case.get("summary", ""), date=case.get("date", ""), location=case.get("location", ""),
             charges=case.get("charges", []), people=[p for p in case.get("people", []) if p.get("name")],
+            defendant_names=[p.get("name") for p in case.get("people", []) if p.get("name")],
             substances=[s for s in case.get("substances", []) if s.get("name")],
             doc_id=doc.id, title=doc.metadata.get("title", ""),
         )
@@ -273,18 +310,27 @@ class Neo4jGraph:
             """
             MATCH (k:Case)
             WHERE elementId(k) IN $ids OR EXISTS { MATCH (s)--(k) WHERE elementId(s) IN $ids }
-            RETURN DISTINCT elementId(k) AS id, k.name AS name, coalesce(k.summary, '') AS summary
+            RETURN DISTINCT elementId(k) AS id, k.name AS name, coalesce(k.summary, '') AS summary,
+                   coalesce(k.source_title, '') AS source_title, coalesce(k.defendant_names, []) AS defendants,
+                   coalesce(k.charges_list, []) AS charges
             """,
             ids=seed_ids,
         )
         case_ids = [c["id"] for c in cases]
         for c in cases:
+            parts = [f"Vụ việc '{c['name']}'"]
+            if c["source_title"]:
+                parts.append(f"Bài báo: '{c['source_title']}'")
+            if c["defendants"]:
+                parts.append(f"Đối tượng/Bị cáo: {', '.join(c['defendants'])}")
+            if c["charges"]:
+                parts.append(f"Tội danh: {', '.join(c['charges'])}")
             if c["summary"]:
-                facts.append(f"Vụ việc '{c['name']}': {c['summary']}")
+                parts.append(f"Tóm tắt: {c['summary']}")
+            facts.append(". ".join(parts))
 
         # b. Follow (Case)-[:CHARGED_WITH]->(Crime)<-[:DEFINES]-(Article)-[:HAS_CLAUSE]->(Clause)
-        #    Keep clause 1 + clauses mentioning an involved substance + clauses for max penalty if asked
-        is_max_penalty_q = any(w in question.lower() for w in ["tối đa", "cao nhất", "khung cao", "bao nhiêu năm", "mức án"])
+        is_max_penalty_q = any(w in question.lower() for w in ["tối đa", "cao nhất", "khung cao", "bao nhiêu năm", "mức án", "chung thân", "tử hình"])
         if case_ids:
             clauses = self.run(
                 """
@@ -294,14 +340,14 @@ class Neo4jGraph:
                 WHERE cl.number = 1
                    OR EXISTS { MATCH (k)-[:INVOLVES]->(sub:Substance)<-[:MENTIONS]-(cl) }
                    OR ($is_max AND cl.number >= 3)
-                RETURN DISTINCT a.id AS article_id, a.title AS title, cl.number AS number, cl.text AS text
+                RETURN DISTINCT a.id AS article_id, a.title AS title, c.name AS crime, cl.number AS number, cl.text AS text, cl.max_penalty AS max_penalty
                 ORDER BY a.id, cl.number
                 """,
                 case_ids=case_ids,
                 is_max=is_max_penalty_q,
             )
             for cl in clauses:
-                facts.append(f"[{cl['article_id']} - {cl['title']}] khoản {cl['number']}: {cl['text']}")
+                facts.append(f"[{cl['article_id']} - {cl['title']}] tội '{cl['crime']}' khoản {cl['number']}: {cl['text']}")
 
         # c. Articles named directly in the question ("Điều 251" -> re.findall(r"[Đđ]iều (\d+)", question))
         article_numbers = re.findall(r"[Đđ]iều\s*(\d+)", question)
@@ -372,8 +418,36 @@ class GraphRAGAgent:
 
     def answer(self, question: str, top_k: int = 3) -> str:
         chunks = self.store.search(question, top_k=top_k)
-        doc_ids = list(dict.fromkeys(chunk["metadata"]["doc_id"] for chunk in chunks if "doc_id" in chunk.get("metadata", {})))
-        facts = self.graph.context(question, doc_ids)
+        vector_doc_ids = [chunk["metadata"]["doc_id"] for chunk in chunks if "doc_id" in chunk.get("metadata", {})]
+
+        entity_doc_ids = []
+        if hasattr(self.graph, "run"):
+            person_cases = self.graph.run(
+                """
+                MATCH (p:Person)-[:INVOLVED_IN]->(k:Case)
+                WHERE (toLower($q) CONTAINS toLower(p.name)
+                   OR any(a IN coalesce(p.aliases, []) WHERE size(a) >= 3 AND toLower($q) CONTAINS toLower(a)))
+                  AND k.doc_id IS NOT NULL
+                RETURN DISTINCT k.doc_id AS doc_id
+                """,
+                q=question,
+            )
+            entity_doc_ids.extend([r["doc_id"] for r in person_cases if r["doc_id"]])
+
+            q_substances = find_substances(question)
+            if q_substances:
+                sub_cases = self.graph.run(
+                    """
+                    MATCH (k:Case)-[:INVOLVES]->(s:Substance)
+                    WHERE s.name IN $substances AND k.doc_id IS NOT NULL
+                    RETURN DISTINCT k.doc_id AS doc_id
+                    """,
+                    substances=q_substances,
+                )
+                entity_doc_ids.extend([r["doc_id"] for r in sub_cases if r["doc_id"]])
+
+        all_doc_ids = list(dict.fromkeys(vector_doc_ids + entity_doc_ids))
+        facts = self.graph.context(question, all_doc_ids)
         facts_text = "\n".join(f"- {f}" for f in facts) if facts else "Không có dữ kiện graph bổ sung."
         chunks_text = "\n\n".join(f"[{i}] {chunk['content']}" for i, chunk in enumerate(chunks, start=1))
         prompt = GRAPH_PROMPT.format(facts=facts_text, chunks=chunks_text, question=question)
